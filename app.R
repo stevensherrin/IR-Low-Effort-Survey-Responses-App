@@ -392,7 +392,7 @@ ui <- fluidPage(
                                 h4(style = "color: #007BFF; margin-top: 0;", "📚 Documentation"),
                                 p(style = "line-height: 1.6;", 
                                   "For detailed methodology and research background, visit our ",
-                                  a(href = "https://github.com/stevensherrin/IR-Low-Effort-Survey-Responses-App/tree/main/supporting_materials",
+                                  a(href = "https://github.com/stevensherrin/IR-Low-Effort-Survey-Responses-App/tree/main/supporting%20materials",
                                     target = "_blank",
                                     "documentation page", 
                                     style = "color: #007BFF; text-decoration: none;")
@@ -456,7 +456,7 @@ server <- function(input, output, session) {
     if (input$surveySelect == "National Survey of Student Engagement (NSSE)") {
       showModal(modalDialog(
         title = "NSSE Data Upload Instructions",
-        "For the National Survey of Student Engagement (NSSE), you can upload the raw data file in either .sav (SPSS), .csv, or .xlsx. Make sure to upload the raw data file exactly as it was sent by NSSE (i.e. no edits).",
+        "For the National Survey of Student Engagement (NSSE), you can upload the raw data file in either .sav (SPSS), .csv, or .xlsx format. IMPORTANT: Make sure to upload the raw data file exactly as it was sent by NSSE (i.e. no edits).",
         easyClose = TRUE,
         footer = modalButton("OK")
       ))
