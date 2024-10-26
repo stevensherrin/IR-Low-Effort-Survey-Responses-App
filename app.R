@@ -598,10 +598,10 @@ server <- function(input, output, session) {
       percent_removed <- total_removed / all_responses * 100
       
       paste0("You started with <b style='text-decoration: underline double;'>", all_responses, 
-             "</b> respondents. After searching for low-effort responses, we flagged <b style='text-decoration: underline double;'>", 
-             total_removed, "</b> problematic responses (<b style='text-decoration: underline double;'>", 
+             "</b> respondents. After searching for several criteria, we flagged <b style='text-decoration: underline double;'>", 
+             total_removed, "</b>  responses that potentially indicate low effort. (<b style='text-decoration: underline double;'>", 
              round(percent_removed, 1), "% of total</b>). You now have <b style='text-decoration: underline double;'>", 
-             final_valid, "</b> remaining valid responses. For details on the specific issues found, see the table below. For methodology details, see About.")
+             final_valid, "</b> remaining responses. For details on the specific issues found, see the table below. For methodology details, see About.")
     })
     
     
