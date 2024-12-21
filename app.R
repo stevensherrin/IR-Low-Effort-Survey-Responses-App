@@ -257,7 +257,7 @@ ui <- fluidPage(
                  selectInput("dataViewSelect", "See Low-Effort Responses for:",
                              choices = c(
                                "Filter 1: Survey Duration" = "Completed survey in 3 minutes or less",
-                               "Filter 2: Skipped Questions" = "Skipped over 25% of survey questions",
+                               "Filter 2: Skipped Questions" = "Skipped over 50% of survey questions",
                                "Filter 3: Straightlined 15 Responses" = "Straightlined 15 Responses",
                                "Filters 4 & 5: Repeated Straightline Behavior" = "Repeated Straightline Behavior",
                                "Filter 6: Other Repetitive Behavior" = "Other Repetitive Behavior",
@@ -592,16 +592,16 @@ server <- function(input, output, session) {
     
     # Render summary text
     output$summaryText <- renderText({
-      all_responses <- data()$`Remaining Valid Responses`[1]
-      final_valid <- tail(data()$`Remaining Valid Responses`, 1)
-      total_removed <- tail(data()$`Responses Filtered in this Step`, 1)
+      all_responses <- data()$`Remaining Unflagged Responses`[1]
+      final_valid <- tail(data()$`Remaining Unflagged Responses`, 1)
+      total_removed <- tail(data()$`Responses Flagged in this Step`, 1)
       percent_removed <- total_removed / all_responses * 100
       
       paste0("You started with <b style='text-decoration: underline double;'>", all_responses, 
              "</b> respondents. After searching for several criteria, we flagged <b style='text-decoration: underline double;'>", 
              total_removed, "</b>  responses that potentially indicate low effort. (<b style='text-decoration: underline double;'>", 
-             round(percent_removed, 1), "% of total</b>). You now have <b style='text-decoration: underline double;'>", 
-             final_valid, "</b> remaining responses. For details on the specific issues found, see the table below. For methodology details, see About.")
+             round(percent_removed, 1), "% of total</b>). There are  <b style='text-decoration: underline double;'>", 
+             final_valid, "</b> responses that did not receive any flags for potential low effort. For details on the specific issues found, see the table below. For methodology details, see About.")
     })
     
     
@@ -622,22 +622,22 @@ server <- function(input, output, session) {
             minWidth = 350,
             maxWidth = 350
           ),
-          `Remaining Valid Responses` = colDef(
-            name = "Remaining Valid Responses",
+          `Remaining Unflagged Responses` = colDef(
+            name = "Remaining Unflagged Responses",
             headerStyle = list(textAlign = "center"),
             style = list(textAlign = "center"),
             minWidth = 150,
             maxWidth = 150
           ),
-          `Responses Filtered in this Step` = colDef(
-            name = "Responses Filtered in this Step",
+          `Responses Flagged in this Step` = colDef(
+            name = "Responses Flagged in this Step",
             headerStyle = list(textAlign = "center"),
             style = list(textAlign = "center"),
             minWidth = 150,
             maxWidth = 150
           ),
-          `Percent of All Responses Filtered in this Step` = colDef(
-            name = "Percent of All Responses Filtered in this Step",
+          `Percent of All Responses Flagged in this Step` = colDef(
+            name = "Percent of All Responses Flagged in this Step",
             headerStyle = list(textAlign = "center"),
             format = colFormat(percent = TRUE, digits = 1),
             style = list(textAlign = "center"),
@@ -716,8 +716,8 @@ server <- function(input, output, session) {
         reactable(step_1_filtered, defaultPageSize = 10, columns = column_defs, 
                   style = list(width = "75%")) # Limit the width of the table because it's only two columns
         
-      } else if (input$dataViewSelect == "Skipped over 25% of survey questions") {
-        process_individual_examples(df, "Skipped over 25% of survey questions")
+      } else if (input$dataViewSelect == "Skipped over 50% of survey questions") {
+        process_individual_examples(df, "Skipped over 50% of survey questions")
         columns <- colnames(step_2_filtered) # Get the column names of the data
         
         # Create a named list of column definitions
@@ -725,7 +725,7 @@ server <- function(input, output, session) {
           colDef(
             cell = function(value) {
               if (col == "Percentage of Missing Values") {
-                if (!is.na(value) && value >= 25) {
+                if (!is.na(value) && value >= 50) {
                   div(style = "background-color: lightcoral; height: 100%; width: 100%;", value)
                 } else {
                   value

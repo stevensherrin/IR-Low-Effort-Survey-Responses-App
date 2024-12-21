@@ -1,18 +1,17 @@
 # Load necessary libraries
-#library(tidyverse)
-library(openxlsx) #YES
-library(writexl) #Yes
-library(dplyr) #YES
-library(tidyr) #YES
-library(ggplot2) #YES
-library(purrr) #YES
-library(janitor) #YES
-library(gtools) #YES
-library(conflicted) #YES
-library(reactable) #YES
-library(scales) #YES
-library(crosstalk) #YES
-library(htmltools) #Yes
+library(openxlsx)
+library(writexl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(purrr)
+library(janitor)
+library(gtools)
+library(conflicted)
+library(reactable)
+library(scales)
+library(crosstalk)
+library(htmltools)
 
 conflicts_prefer(base::as.numeric())
 conflicts_prefer(base::is.character())
@@ -42,6 +41,66 @@ required_vars <- c(
   "tmprephrs","tmcocurrhrs", "tmworkonhrs", "tmworkoffhrs", "tmservicehrs",
   "tmrelaxhrs", "tmcarehrs", "tmcommutehrs", "duration"
 )
+
+# Function to remove singular columns (i.e. columns with zero variance or perfect collinearity)
+# NSSE files sometimes have identical columns
+remove_singular_columns <- function(data, threshold = 0.999) {
+  # Store original row count
+  original_rows <- nrow(data)
+  
+  # Convert all columns to numeric
+  data_numeric <- data %>%
+    mutate(across(everything(), as.numeric))
+  
+  # Remove columns with zero variance, but keep all rows
+  var_zero <- apply(data_numeric, 2, var, na.rm = TRUE) == 0
+  if(any(var_zero)) {
+    data_numeric <- data_numeric[, !var_zero]
+    cat("Removed", sum(var_zero), "columns with zero variance\n")
+  }
+  
+  # Calculate correlation matrix with pairwise complete obs
+  cor_matrix <- cor(data_numeric, use = "pairwise.complete.obs")
+  
+  # Find highly correlated pairs
+  high_cor <- which(abs(cor_matrix) > threshold & cor_matrix != 1, arr.ind = TRUE)
+  
+  if(nrow(high_cor) > 0) {
+    cols_to_remove <- c()
+    
+    for(i in 1:nrow(high_cor)) {
+      if(high_cor[i,1] < high_cor[i,2]) {
+        col1 <- colnames(data_numeric)[high_cor[i,1]]
+        col2 <- colnames(data_numeric)[high_cor[i,2]]
+        
+        if(!(col1 %in% cols_to_remove) && !(col2 %in% cols_to_remove)) {
+          na_count1 <- sum(is.na(data_numeric[[col1]]))
+          na_count2 <- sum(is.na(data_numeric[[col2]]))
+          
+          if(na_count1 >= na_count2) {
+            cols_to_remove <- c(cols_to_remove, col1)
+          } else {
+            cols_to_remove <- c(cols_to_remove, col2)
+          }
+        }
+      }
+    }
+    
+    if(length(cols_to_remove) > 0) {
+      cat("Removed", length(cols_to_remove), "highly correlated columns:", 
+          paste(cols_to_remove, collapse = ", "), "\n")
+      data_numeric <- data_numeric %>% select(-all_of(cols_to_remove))
+    }
+  }
+  
+  # Verify no rows were lost
+  if(nrow(data_numeric) != original_rows) {
+    warning("Row count changed during processing. This should not happen.")
+  }
+  
+  return(data_numeric)
+}
+
 
 # Function to check required variables
 check_missing_vars <- function(df) {
@@ -176,9 +235,21 @@ identify_careless_responses <- function(df) {
   print("Step 1 completed")
   
   # Step 2: Screen for high number of missing values
-  global_flags$step_2 <- sum(rowSums(is.na(df_main_page %>% select(-unique_id, -duration))) >= 15, na.rm = TRUE)
+  df_for_missing <- df_main_page %>% 
+    select(-unique_id, -duration)  # Remove ID and duration from missing calc
+  
+  total_possible_responses <- ncol(df_for_missing)
+  missing_counts <- rowSums(is.na(df_for_missing))
+  missing_percentages <- (missing_counts / total_possible_responses) * 100
+  
+  # Flag responses with > 50% missing
+  global_flags$step_2 <- sum(missing_percentages > 50, na.rm = TRUE)
+  
+  # Calculate missing percentages for step_1 data
   step_2 <- step_1 %>%
-    filter(rowSums(is.na(step_1)) < 15)
+    mutate(missing_percentage = rowSums(is.na(select(., -unique_id))) / (ncol(.) - 1) * 100) %>%
+    filter(missing_percentage <= 50)
+  
   print("Step 2 completed")
   
   # Step 3: Screen for longstrings of 15 or more
@@ -231,8 +302,8 @@ identify_careless_responses <- function(df) {
     df_main_scales <- calculate_longstring_ratio(df_main_scales, set_name, set_columns)
   }
   df_main_scales <- df_main_scales %>%
-    mutate(longstring_3_or_more_scales = rowSums(select(., starts_with("q_set_")) == 1))
-  global_flags$step_5 <- sum(df_main_scales$longstring_3_or_more_scales >= 3, na.rm = TRUE)
+    mutate(longstring_4_or_more_scales = rowSums(select(., starts_with("q_set_")) == 1))
+  global_flags$step_5 <- sum(df_main_scales$longstring_4_or_more_scales >= 4, na.rm = TRUE)
   
   step_4$unique_id <- as.character(step_4$unique_id)
   df$unique_id <- as.character(df$unique_id)
@@ -248,17 +319,16 @@ identify_careless_responses <- function(df) {
   }
   
   step_5 <- step_5 %>%
-    mutate(longstring_3_or_more_scales = rowSums(select(., starts_with("q_set_")) == 1)) 
+    mutate(longstring_4_or_more_scales = rowSums(select(., starts_with("q_set_")) == 1)) 
   
   step_5_values <- step_5 %>%
-    select(unique_id, longstring_3_or_more_scales)
+    select(unique_id, longstring_4_or_more_scales)
   
   step_5 <- step_5 %>%
-    filter(longstring_3_or_more_scales < 3)
+    filter(longstring_4_or_more_scales < 4)
   print("Step 5 completed")
   
-  # Step 6: Screen for 2-value repetitive pattern
-  # Calculate global flag using full dataset
+  # Step 6: Screen for repetitive pattern
   df_main_patterns <- df_main_page %>%
     select(-duration) %>%
     mutate(
@@ -319,37 +389,59 @@ identify_careless_responses <- function(df) {
   
   # Step 8: Screen for unusual responses to highly correlated items
   # Calculate global flag using full dataset
+  print("Starting Step 8: Screening for unusual responses")
+  
   df_main_corr <- df %>%
     select(unique_id, askquest:sameinst) %>%
     mutate(across(everything(), ~ as.numeric(as.character(.)))) %>%
-    select(where(~!all(is.na(.)))) %>%
-    mutate(
-      mv_syn = psychsyn(select(., -unique_id), critval = .50),
-      mv_mahad = scale(mahad(select(., -unique_id)))
-    )
-  global_flags$step_8 <- sum(df_main_corr$mv_mahad >= 3 | df_main_corr$mv_syn <= 0, na.rm = TRUE)
+    select(where(~!all(is.na(.)))) 
   
+  # First calculate psychsyn
+  df_main_corr <- df_main_corr %>%
+    mutate(mv_syn = psychsyn(select(., -unique_id), critval = .50))
+  
+  # Remove singular columns and calculate Mahalanobis distance
+  df_for_mahad <- remove_singular_columns(select(df_main_corr, -unique_id))
+  
+  tryCatch({
+    df_main_corr$mv_mahad <- scale(mahad(df_for_mahad))
+  }, error = function(e) {
+    warning("Error in Mahalanobis distance calculation: ", e$message)
+    df_main_corr$mv_mahad <- NA
+  })
+  
+  # Flag unusual responses but don't remove them
+  global_flags$step_8 <- sum((df_main_corr$mv_mahad > 4 | df_main_corr$mv_syn <= 0) & 
+                               !is.na(df_main_corr$mv_mahad) & 
+                               !is.na(df_main_corr$mv_syn), 
+                             na.rm = TRUE)
+  
+  # Process step 8 while preserving all rows
   step_8 <- df %>%
     select(unique_id, askquest:sameinst) %>%
     filter(unique_id %in% step_7$unique_id) %>%
     mutate(across(everything(), ~ as.numeric(as.character(.)))) %>%
     select(where(~!all(is.na(.))))
   
-  step_8_filtered <- step_8 %>%
-    select(-unique_id)
+  step_8_filtered <- remove_singular_columns(select(step_8, -unique_id))
   
-  step_8_filtered <- step_8_filtered %>%
-    mutate(across(everything(), scale))
-  
-  step_8$mv_syn <- psychsyn(step_8_filtered, critval = .50)
-  step_8$mv_mahad <- scale(mahad(step_8_filtered))
-  
-  step_8 <- step_8 %>%
-    filter(mv_mahad < 3 & mv_syn > 0)
+  tryCatch({
+    step_8$mv_syn <- psychsyn(step_8_filtered, critval = .50)
+    step_8$mv_mahad <- scale(mahad(step_8_filtered))
+    
+    # Instead of filtering out rows, flag them
+    step_8 <- step_8 %>%
+      mutate(unusual_response = mv_mahad > 4 | mv_syn <= 0)
+  }, error = function(e) {
+    warning("Error in Step 8 processing: ", e$message)
+    step_8 <- step_8 %>%
+      mutate(mv_mahad = NA,
+             mv_syn = NA,
+             unusual_response = FALSE)
+  })
   
   print("Step 8 completed")
   
-  # Rest of the function remains exactly the same
   steps <- list(df, step_1, step_2, step_3, step_4, step_5, step_6, step_7, step_8)
   
   # Initialize an empty vector to store the changes
@@ -379,12 +471,12 @@ identify_careless_responses <- function(df) {
   last_occurrence <- last_occurrence %>%
     mutate(last_dataframe = recode(last_dataframe, 
                                    `step_0` = "Completed survey in 3 minutes or less",
-                                   `step_1` = "Skipped over 25% of survey questions",
+                                   `step_1` = "More than 50% of survey questions missing",
                                    `step_2` = "Straightlined 15 or more responses in a row",
                                    `step_3` = "Had 3 or more times they straightlined least 7 responses in a row",
-                                   `step_4` = "Straightlined 3 or more scales",
+                                   `step_4` = "Straightlined 4 or more scales",
                                    `step_5` = "Made repetitive pattern (e.g. AB-AB-AB) 60% or more of the time",
-                                   `step_6` = "Unrealistic responses to quantitative question set (e.g. hours per week)",
+                                   `step_6` = "Unrealistic response to quantitative question (e.g. hours per week)",
                                    `step_7` = "Highly unusual responses to highly correlated items",
                                    `step_8` = "")) %>%
     rename(`Reason for Flag` = last_dataframe)
@@ -398,6 +490,26 @@ identify_careless_responses <- function(df) {
     left_join(last_occurrence, by = "unique_id") %>%
     select(`Flagged for Low Effort?`, `Reason for Flag`, unique_id, everything())
   
+  # Add global flag columns
+  df <- df %>%
+    mutate(
+      `Flag: Duration <= 3 min` = unique_id %in% df_main_page$unique_id[df_main_page$duration <= 3 & !is.na(df_main_page$duration)],
+      `Flag: >50% Missing` = unique_id %in% df_main_page$unique_id[rowSums(is.na(df_main_page %>% select(-unique_id, -duration))) / ncol(df_main_page %>% select(-unique_id, -duration)) > 0.5],
+      `Flag: Longstring >= 15` = unique_id %in% df_main_page$unique_id[df_main_page$longstring >= 15],
+      `Flag: Repeated Longstring >= 7` = unique_id %in% df_main_page$unique_id[df_main_page$longstring_7_or_more >= 3],
+      `Flag: 4+ Scales Straightlined` = unique_id %in% df_main_scales$unique_id[df_main_scales$longstring_4_or_more_scales >= 4],
+      `Flag: Repetitive Pattern` = unique_id %in% df_main_patterns$unique_id[df_main_patterns$repetitive == 1],
+      `Flag: Hours > 140` = unique_id %in% df_hours_all$unique_id[df_hours_all$total_hours_per_week > 140],
+      `Flag: Unusual Correlations` = unique_id %in% df_main_corr$unique_id[df_main_corr$mv_mahad > 4 | df_main_corr$mv_syn <= 0]
+    ) %>%
+    mutate(across(starts_with("Flag:"), ~ifelse(., "Yes", "No"))) %>%
+    select(
+      `Flagged for Low Effort?`,
+      `Primary Reason for Flag` = `Reason for Flag`,
+      starts_with("Flag:"),
+      everything()
+    )
+  
   assign("df", df, envir = .GlobalEnv)
   assign("step_1", step_1, envir = .GlobalEnv)
   assign("step_2", step_2, envir = .GlobalEnv)
@@ -406,48 +518,18 @@ identify_careless_responses <- function(df) {
   assign("step_5", step_5, envir = .GlobalEnv)
   assign("step_6", step_6, envir = .GlobalEnv)
   assign("step_7", step_7, envir = .GlobalEnv)
-         assign("df", df, envir = .GlobalEnv)
-         assign("step_1", step_1, envir = .GlobalEnv)
-         assign("step_2", step_2, envir = .GlobalEnv)
-         assign("step_3", step_3, envir = .GlobalEnv)
-         assign("step_4", step_4, envir = .GlobalEnv)
-         assign("step_5", step_5, envir = .GlobalEnv)
-         assign("step_6", step_6, envir = .GlobalEnv)
-         assign("step_7", step_7, envir = .GlobalEnv)
-         assign("step_8", step_8, envir = .GlobalEnv)
-         
-         assign("step_3_values", step_3_values, envir = .GlobalEnv)
-         assign("step_4_values", step_4_values, envir = .GlobalEnv)
-         assign("step_5_values", step_5_values, envir = .GlobalEnv)
-         assign("step_6_values", step_6_values, envir = .GlobalEnv)
-         assign("step_7_values", step_7_values, envir = .GlobalEnv)
-         
-         # Add global flag columns
-         df <- df %>%
-           mutate(
-             `Flag: Duration <= 3 min` = unique_id %in% df_main_page$unique_id[df_main_page$duration <= 3 & !is.na(df_main_page$duration)],
-             `Flag: >25% Missing` = unique_id %in% df_main_page$unique_id[rowSums(is.na(df_main_page %>% select(-unique_id, -duration))) >= 15],
-             `Flag: Longstring >= 15` = unique_id %in% df_main_page$unique_id[df_main_page$longstring >= 15],
-             `Flag: Repeated Longstring >= 7` = unique_id %in% df_main_page$unique_id[df_main_page$longstring_7_or_more >= 3],
-             `Flag: 3+ Scales Straightlined` = unique_id %in% df_main_scales$unique_id[df_main_scales$longstring_3_or_more_scales >= 3],
-             `Flag: Repetitive Pattern` = unique_id %in% df_main_patterns$unique_id[df_main_patterns$repetitive == 1],
-             `Flag: Hours > 140` = unique_id %in% df_hours_all$unique_id[df_hours_all$total_hours_per_week > 140],
-             `Flag: Unusual Correlations` = unique_id %in% df_main_corr$unique_id[df_main_corr$mv_mahad >= 3 | df_main_corr$mv_syn <= 0]
-           ) %>%
-           # Convert logical to Yes/No
-           mutate(across(starts_with("Flag:"), ~ifelse(., "Yes", "No"))) %>%
-           # Reorder columns to put flags after the existing flag columns
-           select(
-             #`Row in Dataset` = unique_id,
-             `Flagged for Low Effort?`,
-             `Primary Reason for Flag` = `Reason for Flag`,
-             starts_with("Flag:"),
-             everything()
-           )
-         return(df)
+  assign("step_8", step_8, envir = .GlobalEnv)
+  
+  assign("step_3_values", step_3_values, envir = .GlobalEnv)
+  assign("step_4_values", step_4_values, envir = .GlobalEnv)
+  assign("step_5_values", step_5_values, envir = .GlobalEnv)
+  assign("step_6_values", step_6_values, envir = .GlobalEnv)
+  assign("step_7_values", step_7_values, envir = .GlobalEnv)
+  
+  return(df)
 }
 
-# Function to process the data for summary table
+# Function to calculate summary
 calculate_summary <- function(df) {
   # First get all unique respondents flagged at each step
   flagged_respondents <- list()
@@ -460,22 +542,20 @@ calculate_summary <- function(df) {
     flagged_respondents[[i]] <- setdiff(previous_step$unique_id, current_step$unique_id)
   }
   
-  # In calculate_summary function:
-
-  # Start with the initial summary dataframe
+  # Create summary dataframe
   summary_df <- tibble(
     `Step Description` = c(
       "Initial Number of Survey Responses",  # New first row
       "Raw Dataset",
       "Survey completed in 3 minutes or less", 
-      "Skipped over 25% of survey questions",
+      "More than 50% of survey questions missing",
       "Straightlined 15 or more responses in a row",
       "Had 3 or more times they straightlined at least 7 responses in a row",
-      "Straightlined 3 or more scales",
+      "Straightlined 4 or more scales",
       "Made repetitive pattern (e.g. AB-AB-AB) 60% or more of the time",
       "Unrealistic response to quantitative question (e.g. hours per week)",
       "Highly unusual responses to highly correlated items"),
-    `Remaining Valid Responses` = c(
+    `Remaining Unflagged Responses` = c(
       nrow(df),  # Starting count
       nrow(df),
       nrow(df) - length(flagged_respondents[[1]]),
@@ -487,7 +567,7 @@ calculate_summary <- function(df) {
       nrow(df) - length(unique(unlist(flagged_respondents[1:7]))),
       nrow(df) - length(unique(unlist(flagged_respondents[1:8])))
     ),
-    `Responses Filtered in this Step` = c(
+    `Responses Flagged in this Step` = c(
       NA_integer_,  # Blank for first row
       0,
       length(flagged_respondents[[1]]),
@@ -499,7 +579,7 @@ calculate_summary <- function(df) {
       length(flagged_respondents[[7]]),
       length(flagged_respondents[[8]])
     ),
-    `Percent of All Responses Filtered in this Step` = c(
+    `Percent of All Responses Flagged in this Step` = c(
       NA_real_,  # Blank for first row
       0,
       length(flagged_respondents[[1]]) / nrow(df),
@@ -536,33 +616,34 @@ calculate_summary <- function(df) {
       global_flags$step_8 / nrow(df)
     ), accuracy = 0.1)
   )
-
+  
   # Number the steps (skip first row)
   summary_df$`Step Description`[3:nrow(summary_df)] <- paste0(
     "Step ", 1:(nrow(summary_df)-2), ": ", 
     summary_df$`Step Description`[3:nrow(summary_df)]
   )
-
+  
   # Add final summary row
   all_flagged_ids <- unique(unlist(flagged_respondents))
   total_unique_flagged <- length(all_flagged_ids)
   total_unique_percentage <- total_unique_flagged / nrow(df)
-
+  
   summary_df <- summary_df %>%
     bind_rows(
       tibble(
         `Step Description` = "Final Summary of All Steps",
-        `Remaining Valid Responses` = nrow(df) - total_unique_flagged,
-        `Responses Filtered in this Step` = total_unique_flagged,
-        `Percent of All Responses Filtered in this Step` = total_unique_percentage,
+        `Remaining Unflagged Responses` = nrow(df) - total_unique_flagged,
+        `Responses Flagged in this Step` = total_unique_flagged,
+        `Percent of All Responses Flagged in this Step` = total_unique_percentage,
         `Total Responses Flagged for this Issue` = NA_integer_,
         `Percent of All Responses with this Issue` = NA_character_
       )
     )
-
+  
   assign("summary_df", summary_df, envir = .GlobalEnv)
   return(summary_df)
 }
+
 # Format summary table
 format_percentage_cell <- function(value) {
   value <- min(max(value, 0), 1)
@@ -587,9 +668,9 @@ process_individual_examples <- function(df, view_select) {
     assign("step_1_filtered", step_1_filtered, envir = .GlobalEnv)
     return(step_1_filtered)
     
-  } else if (view_select == "Skipped over 25% of survey questions") {
+  } else if (view_select == "More than 50% of survey questions missing") {
     step_2_filtered <- step_1 %>%
-      mutate(missing_percentage = round(rowSums(is.na(.)) / ncol(.) * 100, 1)) %>%
+      mutate(missing_percentage = round(rowSums(is.na(select(., -unique_id))) / (ncol(.) - 1) * 100, 1)) %>%
       select(missing_percentage, unique_id, everything()) %>%
       arrange(desc(missing_percentage)) %>%
       rename(
@@ -612,7 +693,7 @@ process_individual_examples <- function(df, view_select) {
       arrange(desc(longstring_7_or_more)) %>%
       rename(`Row in Dataset` = unique_id,
              `# of Times Straightlined 7 or More Responses` = longstring_7_or_more,
-             `# of Subscales Straightlined` = longstring_3_or_more_scales) %>%
+             `# of Subscales Straightlined` = longstring_4_or_more_scales) %>%
       select(`Row in Dataset`, 
              `# of Times Straightlined 7 or More Responses`, 
              `# of Subscales Straightlined`,
@@ -636,23 +717,22 @@ process_individual_examples <- function(df, view_select) {
     assign("step_6_values", step_6_values, envir = .GlobalEnv)
     return(step_6_values)
   } else if (view_select == "Extreme Responses to `How many hours per week?` Questions") {
-      step_7_values <- df %>%
-        select(unique_id, tmprephrs:tmcommutehrs) %>%
-        mutate(across(-unique_id, ~as.numeric(as.character(.)))) %>%
-        mutate(`Total Hours per Week` = rowSums(select(., -unique_id), na.rm = TRUE)) %>%
-        mutate(`Flagged for Unrealistic Hours?` = ifelse(`Total Hours per Week` > 140, "Yes", "No")) %>%
-        mutate(`Total Hours per Week` = ifelse(is.na(`Total Hours per Week`), 0, `Total Hours per Week`)) %>%
-        arrange(desc(`Total Hours per Week`)) %>%
-        rename(`Row in Dataset` = unique_id) %>%
-        # Reorder columns to put total and flag first
-        select(
-          `Row in Dataset`,
-          `Total Hours per Week`,
-          `Flagged for Unrealistic Hours?`,
-          everything()
-        )
-      
-      assign("step_7_values", step_7_values, envir = .GlobalEnv)
-      return(step_7_values)
+    step_7_values <- df %>%
+      select(unique_id, tmprephrs:tmcommutehrs) %>%
+      mutate(across(-unique_id, ~as.numeric(as.character(.)))) %>%
+      mutate(`Total Hours per Week` = rowSums(select(., -unique_id), na.rm = TRUE)) %>%
+      mutate(`Flagged for Unrealistic Hours?` = ifelse(`Total Hours per Week` > 140, "Yes", "No")) %>%
+      mutate(`Total Hours per Week` = ifelse(is.na(`Total Hours per Week`), 0, `Total Hours per Week`)) %>%
+      arrange(desc(`Total Hours per Week`)) %>%
+      rename(`Row in Dataset` = unique_id) %>%
+      select(
+        `Row in Dataset`,
+        `Total Hours per Week`,
+        `Flagged for Unrealistic Hours?`,
+        everything()
+      )
+    
+    assign("step_7_values", step_7_values, envir = .GlobalEnv)
+    return(step_7_values)
   }
 }
