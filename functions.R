@@ -193,3 +193,174 @@ syn_for_one <- function(x, item_pairs, resample_na) {
   
   return(c(sum_item_pairs, synvalue))
 }
+
+# Function to remove singular columns (i.e. columns with zero variance or perfect collinearity)
+# Some raw data files, such as for NSSE, sometimes have identical columns
+remove_singular_columns <- function(data, threshold = 0.999) {
+  # Store original row count
+  original_rows <- nrow(data)
+  
+  # Convert all columns to numeric
+  data_numeric <- data %>%
+    mutate(across(everything(), as.numeric))
+  
+  # Remove columns with zero variance, but keep all rows
+  var_zero <- apply(data_numeric, 2, var, na.rm = TRUE) == 0
+  if(any(var_zero)) {
+    data_numeric <- data_numeric[, !var_zero]
+    cat("Removed", sum(var_zero), "columns with zero variance\n")
+  }
+  
+  # Calculate correlation matrix with pairwise complete obs
+  cor_matrix <- cor(data_numeric, use = "pairwise.complete.obs")
+  
+  # Find highly correlated pairs
+  high_cor <- which(abs(cor_matrix) > threshold & cor_matrix != 1, arr.ind = TRUE)
+  
+  if(nrow(high_cor) > 0) {
+    cols_to_remove <- c()
+    
+    for(i in 1:nrow(high_cor)) {
+      if(high_cor[i,1] < high_cor[i,2]) {
+        col1 <- colnames(data_numeric)[high_cor[i,1]]
+        col2 <- colnames(data_numeric)[high_cor[i,2]]
+        
+        if(!(col1 %in% cols_to_remove) && !(col2 %in% cols_to_remove)) {
+          na_count1 <- sum(is.na(data_numeric[[col1]]))
+          na_count2 <- sum(is.na(data_numeric[[col2]]))
+          
+          if(na_count1 >= na_count2) {
+            cols_to_remove <- c(cols_to_remove, col1)
+          } else {
+            cols_to_remove <- c(cols_to_remove, col2)
+          }
+        }
+      }
+    }
+    
+    if(length(cols_to_remove) > 0) {
+      cat("Removed", length(cols_to_remove), "highly correlated columns:", 
+          paste(cols_to_remove, collapse = ", "), "\n")
+      data_numeric <- data_numeric %>% select(-all_of(cols_to_remove))
+    }
+  }
+  
+  # Verify no rows were lost
+  if(nrow(data_numeric) != original_rows) {
+    warning("Row count changed during processing. This should not happen.")
+  }
+  
+  return(data_numeric)
+}
+
+# Function to check required variables
+check_missing_vars <- function(df) {
+  df_columns <- colnames(df)
+  missing_vars <- setdiff(required_vars, df_columns)
+  
+  if (length(missing_vars) > 0) {
+    print(paste("The following columns are missing from your raw file:", 
+                paste(missing_vars, collapse = ", "), 
+                ". Some of this may be due to analyzing a particular year for the survey, especially older years. Keep in mind this may prevent the analysis from running properly."))
+  } else {
+    print("All required columns are present.")
+  }
+  
+  return(missing_vars)
+}
+
+# Function to clean and prep the dataframe (e.g. remove NA columns)
+clean_data <- function(df) {
+  df <- clean_names(df)
+  print("Column names successfully cleaned")
+  
+  na_or_empty_names <- which(is.na(names(df)) | names(df) == "")
+  
+  if (length(na_or_empty_names) > 0) {
+    cat("Columns with NA or empty names:", na_or_empty_names, "\n")
+    names(df)[na_or_empty_names] <- paste("V", na_or_empty_names, sep = "")
+  } else {
+    print("No columns with NA or empty names")
+  }
+  
+  df <- df %>% mutate(unique_id = paste0(row_number()))
+  print("Unique identifier for each row created")
+  
+  assign("df", df, envir = .GlobalEnv)
+  return(df)
+}
+
+# Function to process a single filter/analysis step
+process_step <- function(df, step_number, condition_fn, flag_threshold, step_desc) {
+  result <- list()
+  result$flagged <- condition_fn(df)
+  result$flag_count <- sum(result$flagged, na.rm = TRUE)
+  result$remaining_ids <- df$unique_id[!result$flagged]
+  result$step_desc <- step_desc
+  return(result)
+}
+
+# Function to calculate mahalanobis distance in app
+calculate_mahalanobis <- function(df) {
+  tryCatch({
+    df_filtered <- remove_singular_columns(select(df, -unique_id))
+    mahad_dist <- scale(mahad(df_filtered))
+    return(mahad_dist)
+  }, error = function(e) {
+    warning("Error in Mahalanobis distance calculation: ", e$message)
+    return(rep(NA, nrow(df)))
+  })
+}
+
+# Function to process psychometric synonyms in app
+calculate_psychsyn <- function(df) {
+  tryCatch({
+    df_filtered <- remove_singular_columns(select(df, -unique_id))
+    syn_values <- psychsyn(df_filtered, critval = .50)
+    return(syn_values)
+  }, error = function(e) {
+    warning("Error in psychometric synonym calculation: ", e$message)
+    return(rep(NA, nrow(df)))
+  })
+}
+
+# Function to calculate repeated patterns in app
+calculate_repeated_pattern_percentage <- function(data, lag) {
+  # Handle non-numeric columns
+  data_numeric <- data %>%
+    select_if(function(x) is.numeric(x) | all(grepl("^[0-9]+$", na.omit(x))))
+  
+  # Convert remaining character columns to numeric if possible
+  data_numeric <- data_numeric %>%
+    mutate(across(everything(), as.numeric))
+  
+  # Calculate the number of matches with lagged values
+  matches <- rowSums(data_numeric == lag(data_numeric, n = lag, default = NA), na.rm = TRUE)
+  
+  # Calculate total non-NA values
+  total_values <- rowSums(!is.na(data_numeric))
+  
+  # Calculate percentage
+  percentage <- (matches / total_values) * 100
+  
+  return(percentage)
+}
+
+# Function to calculate longstring in app
+calculate_longstring_ratio <- function(df, set_name, set_columns) {
+  # Check if all columns exist in the dataframe
+  existing_columns <- intersect(set_columns, colnames(df))
+  
+  if (length(existing_columns) > 0) {
+    # Calculate longstring only for existing columns
+    df[[paste0(set_name, "_longstring")]] <- as.numeric(
+      longstring(df[, existing_columns, drop = FALSE]) / 
+        rowSums(!is.na(df[, existing_columns, drop = FALSE]))
+    )
+  } else {
+    # If no columns exist, set ratio to 0
+    df[[paste0(set_name, "_longstring")]] <- 0
+  }
+  
+  return(df)
+}
